@@ -31,6 +31,10 @@ The release facts provide:
 The bundle archive is used to extract and verify the signed in-bundle
 `release.json` before registry generation.
 
+Registry generation also fetches the published SpiderVenoms `.sha256` release
+assets and cross-checks them against the release-facts document. The published
+checksum assets are treated as the registry source of truth for artifact hashes.
+
 ## Release outputs
 
 Registry releases publish:

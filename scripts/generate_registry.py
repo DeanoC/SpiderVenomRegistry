@@ -6,6 +6,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import urllib.request
 from typing import Any
 
 
@@ -44,6 +45,23 @@ def verify_package_projection(release_json: dict[str, Any], release_facts: dict[
         facts_package = facts_by_id[package_id]
         for field in ("venom_id", "kind", "release_version", "channel", "digest"):
             ensure(release_package.get(field) == facts_package.get(field), f"package projection mismatch for {package_id}: {field}")
+
+
+def parse_sha256_checksum(source: str, payload: str) -> str:
+    lines = payload.splitlines()
+    ensure(bool(lines), f"empty checksum payload from {source}")
+    sha256 = lines[0].split()[0].strip()
+    ensure(len(sha256) == 64, f"invalid checksum payload from {source}: {sha256!r}")
+    return sha256
+
+
+def fetch_published_sha256(url: str) -> str:
+    try:
+        with urllib.request.urlopen(url) as response:
+            payload = response.read().decode("utf-8")
+    except Exception as exc:
+        fail(f"failed to fetch checksum asset {url}: {exc}")
+    return parse_sha256_checksum(url, payload)
 
 
 def build_bundle_release_doc(
@@ -132,12 +150,28 @@ def main() -> None:
     ensure(isinstance(artifacts, list) and artifacts, "release facts missing artifacts")
     verify_package_projection(release_json, release_facts)
 
+    resolved_artifacts: list[dict[str, Any]] = []
     for artifact in artifacts:
         ensure(isinstance(artifact, dict), "artifact entry must be an object")
         url = artifact.get("url")
         sha256 = artifact.get("sha256")
+        sha256_asset_url = artifact.get("sha256_asset_url")
         ensure(isinstance(url, str) and url, "artifact url missing")
         ensure(isinstance(sha256, str) and len(sha256) == 64, f"artifact sha256 invalid for {url}")
+        ensure(
+            isinstance(sha256_asset_url, str) and sha256_asset_url,
+            f"artifact checksum asset url missing for {url}",
+        )
+        published_sha256 = fetch_published_sha256(sha256_asset_url)
+        if published_sha256 != sha256:
+            print(
+                f"warning: release facts checksum mismatch for {url}; "
+                f"using published checksum asset {published_sha256}",
+                file=sys.stderr,
+            )
+        resolved_artifact = dict(artifact)
+        resolved_artifact["sha256"] = published_sha256
+        resolved_artifacts.append(resolved_artifact)
 
     release_doc = build_bundle_release_doc(
         bundle_id=bundle_id,
@@ -146,7 +180,7 @@ def main() -> None:
         published_at=published_at,
         package_ids=list(package_ids),
         packages=list(packages),
-        artifacts=list(artifacts),
+        artifacts=resolved_artifacts,
         min_spiderweb_version=args.min_spiderweb_version,
         release_json_rel_path="share/spidervenoms/bundles/managed-local/release.json",
     )
