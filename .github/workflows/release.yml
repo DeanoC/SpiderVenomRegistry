@@ -95,12 +95,16 @@ jobs:
           chmod 600 keys/private/active.pem
 
       - name: Extract signed bundle release metadata
+        id: extract_bundle
         working-directory: SpiderVenomRegistry
         run: |
           set -euo pipefail
           mkdir -p .tmp/extracted
           tar -xzf .tmp/spidervenoms/spidervenoms-managed-local-linux-x86_64.tar.gz -C .tmp/extracted
-          test -f .tmp/extracted/share/spidervenoms/bundles/managed-local/release.json
+          release_json_path="$(find .tmp/extracted -path '*/share/spidervenoms/bundles/managed-local/release.json' | head -n1)"
+          test -n "$release_json_path"
+          test -f "$release_json_path"
+          echo "release_json_path=$release_json_path" >> "$GITHUB_OUTPUT"
 
       - name: Generate signed registry documents
         working-directory: SpiderVenomRegistry
@@ -108,14 +112,14 @@ jobs:
           set -euo pipefail
           python3 ./scripts/generate_registry.py \
             --release-facts "$PWD/.tmp/spidervenoms/spidervenoms-release-facts.json" \
-            --release-json "$PWD/.tmp/extracted/share/spidervenoms/bundles/managed-local/release.json" \
+            --release-json "$PWD/${{ steps.extract_bundle.outputs.release_json_path }}" \
             --private-key "$PWD/keys/private/active.pem" \
             --min-spiderweb-version "${{ steps.meta.outputs.min_spiderweb_version }}"
 
       - name: Validate generated registry
         working-directory: SpiderVenomRegistry
         env:
-          RELEASE_JSON_PATH: ${{ github.workspace }}/SpiderVenomRegistry/.tmp/extracted/share/spidervenoms/bundles/managed-local/release.json
+          RELEASE_JSON_PATH: ${{ github.workspace }}/SpiderVenomRegistry/${{ steps.extract_bundle.outputs.release_json_path }}
         run: |
           set -euo pipefail
           bash ./scripts/check-registry.sh
