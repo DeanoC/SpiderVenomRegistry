@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout SpiderVenomRegistry
+        uses: actions/checkout@v4
+        with:
+          path: SpiderVenomRegistry
+
+      - name: Checkout SpiderVenoms
+        uses: actions/checkout@v4
+        with:
+          repository: DeanoC/SpiderVenoms
+          path: SpiderVenoms
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate registry
+        working-directory: SpiderVenomRegistry
+        env:
+          SPIDERVENOMS_ROOT: ${{ github.workspace }}/SpiderVenoms
+        run: |
+          set -euo pipefail
+          bash ./scripts/check-registry.sh

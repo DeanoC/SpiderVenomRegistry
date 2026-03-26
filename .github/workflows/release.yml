@@ -1,0 +1,170 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      spidervenoms_version:
+        description: "SpiderVenoms version to project into the registry"
+        required: true
+        type: string
+      min_spiderweb_version:
+        description: "Minimum compatible Spiderweb version"
+        required: false
+        default: "0.5.4"
+        type: string
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build-registry:
+    name: build-registry
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout SpiderVenomRegistry
+        uses: actions/checkout@v4
+        with:
+          path: SpiderVenomRegistry
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resolve release metadata
+        id: meta
+        working-directory: SpiderVenomRegistry
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="${{ inputs.spidervenoms_version }}"
+          fi
+          if [[ -z "$version" ]]; then
+            echo "missing SpiderVenoms version" >&2
+            exit 1
+          fi
+          min_spiderweb_version="${{ inputs.min_spiderweb_version }}"
+          if [[ -z "$min_spiderweb_version" ]]; then
+            min_spiderweb_version="0.5.4"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "min_spiderweb_version=$min_spiderweb_version" >> "$GITHUB_OUTPUT"
+
+      - name: Validate tag matches projected version
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          expected_tag="v${{ steps.meta.outputs.version }}"
+          if [[ "${GITHUB_REF_NAME}" != "$expected_tag" ]]; then
+            echo "Tag/version mismatch: expected ${expected_tag}, got ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+
+      - name: Download SpiderVenoms release assets
+        working-directory: SpiderVenomRegistry
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp/spidervenoms
+          base_url="https://github.com/DeanoC/SpiderVenoms/releases/download/v${VERSION}"
+          curl -fsSL -o .tmp/spidervenoms/spidervenoms-release-facts.json "${base_url}/spidervenoms-release-facts.json"
+          curl -fsSL -o .tmp/spidervenoms/spidervenoms-managed-local-linux-x86_64.tar.gz "${base_url}/spidervenoms-managed-local-linux-x86_64.tar.gz"
+
+      - name: Prepare signing key
+        working-directory: SpiderVenomRegistry
+        env:
+          PRIVATE_KEY_PEM: ${{ secrets.SPIDERVENOMREGISTRY_PRIVATE_KEY_PEM }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PRIVATE_KEY_PEM}" ]]; then
+            echo "missing required secret: SPIDERVENOMREGISTRY_PRIVATE_KEY_PEM" >&2
+            exit 1
+          fi
+          mkdir -p keys/private
+          printf '%s\n' "${PRIVATE_KEY_PEM}" > keys/private/active.pem
+          chmod 600 keys/private/active.pem
+
+      - name: Extract signed bundle release metadata
+        working-directory: SpiderVenomRegistry
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp/extracted
+          tar -xzf .tmp/spidervenoms/spidervenoms-managed-local-linux-x86_64.tar.gz -C .tmp/extracted
+          test -f .tmp/extracted/share/spidervenoms/bundles/managed-local/release.json
+
+      - name: Generate signed registry documents
+        working-directory: SpiderVenomRegistry
+        run: |
+          set -euo pipefail
+          python3 ./scripts/generate_registry.py \
+            --release-facts "$PWD/.tmp/spidervenoms/spidervenoms-release-facts.json" \
+            --release-json "$PWD/.tmp/extracted/share/spidervenoms/bundles/managed-local/release.json" \
+            --private-key "$PWD/keys/private/active.pem" \
+            --min-spiderweb-version "${{ steps.meta.outputs.min_spiderweb_version }}"
+
+      - name: Validate generated registry
+        working-directory: SpiderVenomRegistry
+        env:
+          RELEASE_JSON_PATH: ${{ github.workspace }}/SpiderVenomRegistry/.tmp/extracted/share/spidervenoms/bundles/managed-local/release.json
+        run: |
+          set -euo pipefail
+          bash ./scripts/check-registry.sh
+
+      - name: Package registry site
+        working-directory: SpiderVenomRegistry
+        run: |
+          set -euo pipefail
+          bash ./scripts/package-registry-site.sh --out-dir "$PWD/dist"
+          test -f "$PWD/dist/spidervenom-registry-v1.tar.gz"
+          test -f "$PWD/dist/spidervenom-registry-v1.tar.gz.sha256"
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: spidervenom-registry-release
+          path: |
+            SpiderVenomRegistry/dist/spidervenom-registry-v1.tar.gz
+            SpiderVenomRegistry/dist/spidervenom-registry-v1.tar.gz.sha256
+            SpiderVenomRegistry/dist/site/**
+          if-no-files-found: error
+
+      - name: Publish GitHub release assets
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            SpiderVenomRegistry/dist/spidervenom-registry-v1.tar.gz
+            SpiderVenomRegistry/dist/spidervenom-registry-v1.tar.gz.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: SpiderVenomRegistry/dist/site
+
+  deploy-pages:
+    name: deploy-pages
+    runs-on: ubuntu-latest
+    needs: build-registry
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
